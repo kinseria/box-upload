@@ -1,9 +1,7 @@
 name: Upload to Box with OAuth
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   upload-to-box:
