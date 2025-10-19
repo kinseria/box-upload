@@ -1,4 +1,4 @@
-name: Upload to Box with OAuth
+name: Upload to Box via OAuth
 
 on:
   workflow_dispatch:
@@ -11,55 +11,69 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Install jq (for parsing JSON)
+      - name: Install jq (for JSON parsing)
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Generate Box Access Token and Upload File
+      - name: Authenticate, create folder, and upload file to Box
         run: |
-          echo "Fetching Box access token..."
+          echo "🔐 Fetching Box access token..."
 
-          # Request access token via client_credentials grant
           TOKEN_RESPONSE=$(curl -s -X POST https://api.box.com/oauth2/token \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "grant_type=client_credentials" \
             -d "client_id=${BOX_CLIENT_ID}" \
             -d "client_secret=${BOX_CLIENT_SECRET}")
 
-          echo "Token response: $TOKEN_RESPONSE"
-
           ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token')
 
-          if [ "$ACCESS_TOKEN" == "null" ]; then
+          if [ "$ACCESS_TOKEN" == "null" ] || [ -z "$ACCESS_TOKEN" ]; then
             echo "❌ Failed to get access token"
+            echo "$TOKEN_RESPONSE"
             exit 1
           fi
 
           echo "✅ Access token obtained"
 
-          # Define file to upload
-          FILE_PATH="20251010_110657.mp4"
-          echo "Sample file content" > $FILE_PATH
+          echo "📁 Creating a folder in Box root (id = 0)..."
 
-          echo "Uploading file $FILE_PATH to Box folder ID $BOX_FOLDER_ID..."
+          FOLDER_NAME="ci-upload-$(date +%s)"
 
-          # Upload the file
-          UPLOAD_RESPONSE=$(curl -s -X POST https://upload.box.com/api/2.0/files/content \
+          CREATE_FOLDER_RESPONSE=$(curl -s -X POST https://api.box.com/2.0/folders \
             -H "Authorization: Bearer $ACCESS_TOKEN" \
-            -F attributes="{\"name\":\"$(basename $FILE_PATH)\", \"parent\":{\"id\":\"$BOX_FOLDER_ID\"}}" \
-            -F file=@$FILE_PATH)
+            -H "Content-Type: application/json" \
+            -d "{\"name\": \"$FOLDER_NAME\", \"parent\": {\"id\": \"0\"}}")
 
-          echo "Upload response: $UPLOAD_RESPONSE"
+          FOLDER_ID=$(echo "$CREATE_FOLDER_RESPONSE" | jq -r '.id')
 
-          FILE_ID=$(echo "$UPLOAD_RESPONSE" | jq -r '.entries[0].id')
-
-          if [ "$FILE_ID" == "null" ]; then
-            echo "❌ Upload failed"
+          if [ "$FOLDER_ID" == "null" ] || [ -z "$FOLDER_ID" ]; then
+            echo "❌ Failed to create folder"
+            echo "$CREATE_FOLDER_RESPONSE"
             exit 1
           fi
 
-          echo "✅ File uploaded successfully. File ID: $FILE_ID"
+          echo "✅ Created folder '$FOLDER_NAME' with ID: $FOLDER_ID"
 
+          echo "📄 Creating example file to upload..."
+          FILE_PATH="20251010_110657.mp4"
+          echo "Uploaded from GitHub Actions at $(date)" > $FILE_PATH
+
+          echo "⏫ Uploading file to Box..."
+
+          UPLOAD_RESPONSE=$(curl -s -X POST https://upload.box.com/api/2.0/files/content \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -F attributes="{\"name\":\"$(basename $FILE_PATH)\", \"parent\":{\"id\":\"$FOLDER_ID\"}}" \
+            -F file=@$FILE_PATH)
+
+          FILE_ID=$(echo "$UPLOAD_RESPONSE" | jq -r '.entries[0].id')
+
+          if [ "$FILE_ID" == "null" ] || [ -z "$FILE_ID" ]; then
+            echo "❌ Upload failed"
+            echo "$UPLOAD_RESPONSE"
+            exit 1
+          fi
+
+          echo "✅ File uploaded successfully to folder '$FOLDER_NAME'. File ID: $FILE_ID"
+          
         env:
           BOX_CLIENT_ID: ${{ secrets.BOX_CLIENT_ID }}
           BOX_CLIENT_SECRET: ${{ secrets.BOX_CLIENT_SECRET }}
-          BOX_FOLDER_ID: ${{ secrets.BOX_FOLDER_ID }}
