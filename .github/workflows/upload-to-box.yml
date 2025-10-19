@@ -1,4 +1,4 @@
-name: Upload to Box via OAuth
+name: Upload files to Box using JWT auth
 
 on:
   workflow_dispatch:
@@ -8,72 +8,96 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v3
 
-      - name: Install jq (for JSON parsing)
-        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
 
-      - name: Authenticate, create folder, and upload file to Box
-        run: |
-          echo "🔐 Fetching Box access token..."
+      - name: Install dependencies
+        run: pip install pyjwt cryptography requests
 
-          TOKEN_RESPONSE=$(curl -s -X POST https://api.box.com/oauth2/token \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "grant_type=client_credentials" \
-            -d "client_id=${BOX_CLIENT_ID}" \
-            -d "client_secret=${BOX_CLIENT_SECRET}")
-
-          ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token')
-
-          if [ "$ACCESS_TOKEN" == "null" ] || [ -z "$ACCESS_TOKEN" ]; then
-            echo "❌ Failed to get access token"
-            echo "$TOKEN_RESPONSE"
-            exit 1
-          fi
-
-          echo "✅ Access token obtained"
-
-          echo "📁 Creating a folder in Box root (id = 0)..."
-
-          FOLDER_NAME="ci-upload-$(date +%s)"
-
-          CREATE_FOLDER_RESPONSE=$(curl -s -X POST https://api.box.com/2.0/folders \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"name\": \"$FOLDER_NAME\", \"parent\": {\"id\": \"0\"}}")
-
-          FOLDER_ID=$(echo "$CREATE_FOLDER_RESPONSE" | jq -r '.id')
-
-          if [ "$FOLDER_ID" == "null" ] || [ -z "$FOLDER_ID" ]; then
-            echo "❌ Failed to create folder"
-            echo "$CREATE_FOLDER_RESPONSE"
-            exit 1
-          fi
-
-          echo "✅ Created folder '$FOLDER_NAME' with ID: $FOLDER_ID"
-
-          echo "📄 Creating example file to upload..."
-          FILE_PATH="20251010_110657.mp4"
-          echo "Uploaded from GitHub Actions at $(date)" > $FILE_PATH
-
-          echo "⏫ Uploading file to Box..."
-
-          UPLOAD_RESPONSE=$(curl -s -X POST https://upload.box.com/api/2.0/files/content \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
-            -F attributes="{\"name\":\"$(basename $FILE_PATH)\", \"parent\":{\"id\":\"$FOLDER_ID\"}}" \
-            -F file=@$FILE_PATH)
-
-          FILE_ID=$(echo "$UPLOAD_RESPONSE" | jq -r '.entries[0].id')
-
-          if [ "$FILE_ID" == "null" ] || [ -z "$FILE_ID" ]; then
-            echo "❌ Upload failed"
-            echo "$UPLOAD_RESPONSE"
-            exit 1
-          fi
-
-          echo "✅ File uploaded successfully to folder '$FOLDER_NAME'. File ID: $FILE_ID"
-          
+      - name: Write Box JWT config file
         env:
-          BOX_CLIENT_ID: ${{ secrets.BOX_CLIENT_ID }}
-          BOX_CLIENT_SECRET: ${{ secrets.BOX_CLIENT_SECRET }}
+          BOX_JWT_CONFIG_JSON: ${{ secrets.BOX_JWT_CONFIG_JSON }}
+        run: |
+          echo "$BOX_JWT_CONFIG_JSON" > box_jwt_config.json
+
+      - name: Generate JWT access token
+        id: generate_token
+        run: |
+          python <<EOF
+          import json, time, jwt, requests
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.backends import default_backend
+
+          # Load config
+          with open("box_jwt_config.json") as f:
+              config = json.load(f)
+
+          client_id = config["boxAppSettings"]["clientID"]
+          client_secret = config["boxAppSettings"]["clientSecret"]
+          enterprise_id = config["enterpriseID"]
+          private_key = config["boxAppSettings"]["appAuth"]["privateKey"]
+          passphrase = config["boxAppSettings"]["appAuth"]["passphrase"].encode()
+          public_key_id = config["boxAppSettings"]["appAuth"]["publicKeyID"]
+
+          # Load private key
+          key = serialization.load_pem_private_key(
+              private_key.encode(),
+              password=passphrase,
+              backend=default_backend()
+          )
+
+          now = int(time.time())
+          claims = {
+              "iss": client_id,
+              "sub": enterprise_id,
+              "box_sub_type": "enterprise",
+              "aud": "https://api.box.com/oauth2/token",
+              "jti": f"{now}abc123",
+              "exp": now + 60
+          }
+
+          jwt_token = jwt.encode(claims, key, algorithm="RS256", headers={"kid": public_key_id})
+
+          token_url = "https://api.box.com/oauth2/token"
+          headers = {"Content-Type": "application/x-www-form-urlencoded"}
+          data = {
+              "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+              "client_id": client_id,
+              "client_secret": client_secret,
+              "assertion": jwt_token
+          }
+
+          response = requests.post(token_url, headers=headers, data=data)
+          if response.status_code == 200:
+              access_token = response.json().get("access_token")
+              print(f"::set-output name=token::{access_token}")
+          else:
+              print("Failed to get token")
+              print(response.status_code, response.text)
+              exit(1)
+          EOF
+
+      - name: Upload example file to Box root folder (id 0)
+        env:
+          BOX_ACCESS_TOKEN: ${{ steps.generate_token.outputs.token }}
+        run: |
+          echo "This file was uploaded by GitHub Actions" > example.txt
+
+          response=$(curl -s -X POST https://upload.box.com/api/2.0/files/content \
+            -H "Authorization: Bearer $BOX_ACCESS_TOKEN" \
+            -F attributes='{"name":"20251010_110657.mp4", "parent":{"id":"0"}}' \
+            -F file=@20251010_110657.mp4)
+
+          echo "Upload response: $response"
+
+          file_id=$(echo "$response" | jq -r '.entries[0].id')
+          if [ "$file_id" = "null" ] || [ -z "$file_id" ]; then
+            echo "❌ File upload failed"
+            exit 1
+          fi
+          echo "✅ File uploaded successfully. File ID: $file_id"
