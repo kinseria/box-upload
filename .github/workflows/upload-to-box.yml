@@ -1,0 +1,67 @@
+name: Upload to Box with OAuth
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  upload-to-box:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install jq (for parsing JSON)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Generate Box Access Token and Upload File
+        run: |
+          echo "Fetching Box access token..."
+
+          # Request access token via client_credentials grant
+          TOKEN_RESPONSE=$(curl -s -X POST https://api.box.com/oauth2/token \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=client_credentials" \
+            -d "client_id=${BOX_CLIENT_ID}" \
+            -d "client_secret=${BOX_CLIENT_SECRET}")
+
+          echo "Token response: $TOKEN_RESPONSE"
+
+          ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token')
+
+          if [ "$ACCESS_TOKEN" == "null" ]; then
+            echo "❌ Failed to get access token"
+            exit 1
+          fi
+
+          echo "✅ Access token obtained"
+
+          # Define file to upload
+          FILE_PATH="20251010_110657.mp4"
+          echo "Sample file content" > $FILE_PATH
+
+          echo "Uploading file $FILE_PATH to Box folder ID $BOX_FOLDER_ID..."
+
+          # Upload the file
+          UPLOAD_RESPONSE=$(curl -s -X POST https://upload.box.com/api/2.0/files/content \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -F attributes="{\"name\":\"$(basename $FILE_PATH)\", \"parent\":{\"id\":\"$BOX_FOLDER_ID\"}}" \
+            -F file=@$FILE_PATH)
+
+          echo "Upload response: $UPLOAD_RESPONSE"
+
+          FILE_ID=$(echo "$UPLOAD_RESPONSE" | jq -r '.entries[0].id')
+
+          if [ "$FILE_ID" == "null" ]; then
+            echo "❌ Upload failed"
+            exit 1
+          fi
+
+          echo "✅ File uploaded successfully. File ID: $FILE_ID"
+
+        env:
+          BOX_CLIENT_ID: ${{ secrets.BOX_CLIENT_ID }}
+          BOX_CLIENT_SECRET: ${{ secrets.BOX_CLIENT_SECRET }}
+          BOX_FOLDER_ID: ${{ secrets.BOX_FOLDER_ID }}
